@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <math.h> // 모터를 sin파로 제어하기 위해 수학 라이브러리 추가
+#include <stdio.h> // 라즈베리파이 문자열 파싱(sscanf)을 위해 표준 입출력 라이브러리 추가
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -39,7 +39,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim3;
-UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart1;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -70,13 +70,22 @@ const osSemaphoreAttr_t myEmergencySem_attributes = {
 
 /* USER CODE BEGIN PV */
 uint8_t is_emergency = 0; // 비상 정지 플래그 (0: 정상 구동, 1: 비상정지 발동)
+
+/* 라즈베리파이 UART 수신 버퍼 변수 */
+uint8_t rx_data;          // 1바이트 데이터가 들어오는 임시 보관함
+char rx_buf[30];          // 문장이 완성될 때까지 담아둘 방석 버퍼
+uint8_t rx_idx = 0;       // 방석 버퍼의 인덱스 제어 포인터
+
+/* 실시간 픽셀 오차 보관용 전역 변수 */
+volatile int32_t rpi_err_x = 0; 
+volatile int32_t rpi_err_y = 0; 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void *argument);
 void StartMotorTask(void *argument);
 void StartEmergencyTask(void *argument);
@@ -112,12 +121,15 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART2_UART_Init();
   MX_TIM3_Init();
+  MX_USART1_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  // [초기 가동 테스트] 커널 가동 전에 PA5 보드 초록 LED를 무조건 점등시킵니다.
+  // [초기 가동 테스트] 커널 가동 전에 보드 내장 초록 LED(PA5)를 무조건 점등시킵니다.
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+  
+  // [인터럽트 가동 개시] USART1 안테나 작동 활성화
+  HAL_UART_Receive_IT(&huart1, &rx_data, 1);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -130,7 +142,6 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  // CubeMX가 코드를 재생성해도 함수가 삭제되지 않도록 슬롯 안에 정확히 배치
   vMotorTaskHandle = osThreadNew(StartMotorTask, NULL, &vMotorTask_attributes);
   vEmergencyTaskHandle = osThreadNew(StartEmergencyTask, NULL, &vEmergencyTask_attributes);
   /* USER CODE END RTOS_THREADS */
@@ -156,7 +167,6 @@ void SystemClock_Config(void)
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  // 정밀 외부 크리스탈(HSE Bypass) 기반 84MHz 메인 심장 세팅
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -219,9 +229,9 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   
-  // ⚙️ 채널 1 세팅 (PA6 핀 매핑)
+  // 채널 1 세팅 (PA6)
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1500;
+  sConfigOC.Pulse = 1500; // 부팅 시 초기 중앙 정렬
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
@@ -229,7 +239,7 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   
-  // ⚙️ 채널 2 세팅 (PA7 핀 매핑)
+  // 채널 2 세팅 (PA7)
   sConfigOC.Pulse = 1500;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
@@ -239,20 +249,20 @@ static void MX_TIM3_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
+  * @brief USART1 Initialization Function
   * @retval None
   */
-static void MX_USART2_UART_Init(void)
+static void MX_USART1_UART_Init(void)
 {
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -298,8 +308,58 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_13) 
   {
-    // 파란 버튼 클릭 시 비상정지 세마포어 전송 (락 해제)
+    // 파란 버튼 클릭 시 비상정지 세마포어 전송
     osSemaphoreRelease(myEmergencySemHandle);
+  }
+}
+
+//USART1 수신 완료 인터럽트 콜백
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if(huart->Instance == USART1)
+  {
+    // 데이터 수신 확인용 보드 초록 LED 토글 반전
+    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+
+    if(rx_data == '\n') // 개행문자를 만나면 한 문장 패킷 완성!
+    {
+      rx_buf[rx_idx] = '\0'; // 문자열 마감
+      
+      int32_t parsed_x = 0;
+      int32_t parsed_y = 0;
+      
+      // sscanf로 포맷 파싱 (X-120Y45 패턴 실시간 추출)
+      if(sscanf(rx_buf, "X%dY%d", &parsed_x, &parsed_y) == 2)
+      {
+        rpi_err_x = parsed_x; // 파싱 성공 시 실시간 변수에 칼주입
+        rpi_err_y = parsed_y;
+      }
+      rx_idx = 0; // 다음 라인을 위해 인덱스 초기화
+    }
+    else
+    {
+      if(rx_idx < 29) // 버퍼 오버플로우 가드레일
+      {
+        rx_buf[rx_idx++] = rx_data;
+      }
+    }
+    
+    // ⚠️ 다음 1글자 연속 낚시질을 위해 비동기 인터럽트 함수 재수행
+    HAL_UART_Receive_IT(&huart1, &rx_data, 1);
+  }
+}
+
+// 🚨 [UART 에러 복구 콜백 함수]
+// 노이즈나 데이터 딜레이로 인해 ORE 오버런 락이 걸렸을 때 즉시 해제해 주는 방패막이 코드
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if(huart->Instance == USART1)
+  {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    
+    HAL_UART_Receive_IT(&huart1, &rx_data, 1); // 통신 파이프라인 재시동
   }
 }
 /* USER CODE END 4 */
@@ -316,49 +376,73 @@ void StartDefaultTask(void *argument)
 
 /* USER CODE BEGIN Header_StartMotorTask */
 /**
-* @brief 2개의 서보모터를 각자 sin파로 제어 및 개별 오차값 보정 연산
+* @brief 라즈베리파이 수신 픽셀 오차 연동 실시간 2축 독립 PD 제어 태스크 (정상 알맹이 보존)
 */
 void StartMotorTask(void *argument)
 {
-  double degree = 0.0;     // 사람이 읽기 쉬운 각도 변수 (0 ~ 360도)
-  double radian = 0.0;     // sin() 함수 주입용 호도법 라디안 변수
-  
-  double calc_motor1 = 0.0;
-  double calc_motor2 = 0.0;
+  // 90도 정중앙 베이스 라인 포지션 대기
+  double x_current = 90.0;       
+  double x_error = 0.0;         
+  double x_prev_error = 0.0;    
+  double x_derivative = 0.0;    
+  double x_control = 0.0;       
 
-  uint32_t pwm_motor1 = 2000;
-  uint32_t pwm_motor2 = 2000;
-  
+  double y_current = 90.0;       
+  double y_error = 0.0;         
+  double y_prev_error = 0.0;    
+  double y_derivative = 0.0;    
+  double y_control = 0.0;       
+
+  // 💡 [실전 픽셀 제어용 최적화 게인 상수]
+  double Kp_x = 0.0008;   double Kd_x = 0.0002; 
+  double Kp_y = 0.0006;   double Kd_y = 0.0002;
+
+  uint32_t pwm_motor1 = 1500;
+  uint32_t pwm_motor2 = 1500;
+
+  // 타이머 3 PWM 가동 스타트
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 
   for(;;)
   {
-    if (is_emergency == 1)
-    {
-      osDelay(10);
-      continue; 
-    }
+    if (is_emergency == 1) { osDelay(10); continue; }
 
-    // 각도를 라디안 단위로 완벽하게 변환 (sin 함수 필수 요건)
-    radian = degree * (3.141592653589793 / 180.0);
-    
-    // 1. 실수(double) 상태에서 음수 펄스 계산을 안전하게 먼저 수행합니다.
-    calc_motor1 = 1500.0 + (1000.0 * sin(radian));
-    calc_motor2 = 1500.0 + (1000.0 * -sin(radian));
-    
-    // 2. 최종 계산된 '양수 결과값'만 안전하게 정수형으로 변환하여 대입 (0~180도 전구간 복구)
-    pwm_motor1 = (uint32_t)calc_motor1;
-    pwm_motor2 = (uint32_t)calc_motor2;
-    
-    // 3. 하드웨어 레벨에서 두 개의 채널 값을 나란히 연속 갱신 (동시 구동 실현)
+    // 인터럽트 파싱 데이터 실시간 수혈
+    x_error = -(double)rpi_err_x;
+    y_error = (double)rpi_err_y;
+
+    // ----------------------------------------------------
+    // 🧠 1번 모터 (X축 / 팬) PD 제어 루프
+    // ----------------------------------------------------
+    x_derivative = x_error - x_prev_error;
+    x_control = (Kp_x * x_error) + (Kd_x * x_derivative);
+    x_current += x_control;
+    x_prev_error = x_error;
+
+    // ----------------------------------------------------
+    // 🧠 2번 모터 (Y축 / 틸트) PD 제어 루프
+    // ----------------------------------------------------
+    y_derivative = y_error - y_prev_error;
+    y_control = (Kp_y * y_error) + (Kd_y * y_derivative);
+    y_current += y_control;
+    y_prev_error = y_error;
+
+    // 🚨 [안전 가드레일 설치] 모터 하드웨어 보호 범위 엄격 제한 (30 ~ 150)
+    if (x_current < 5.0)   x_current = 5.0;
+    if (x_current > 175.0) x_current = 175.0;
+    if (y_current < 5.0)   y_current = 5.0;
+    if (y_current > 175.0) y_current = 175.0;
+
+    // ⚙️ 하드웨어 PWM 매핑 (0~180도 -> 500~2500 정품 스케일 번역 완료)
+    pwm_motor1 = (uint32_t)((x_current * 11.111) + 500.0);
+    pwm_motor2 = (uint32_t)((y_current * 11.111) + 500.0);
+
+    // 하드웨어 타이머 레지스터 강제 업데이트
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_motor1); 
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pwm_motor2); 
-
-    // 각도 전진
-    degree += 2.0; 
-    if(degree > 360.0) degree = 0.0;
     
+    // 정밀 미분 샘플링 타임 유지를 위해 20ms 간격 사수
     osDelay(20); 
   }
 }
@@ -366,22 +450,21 @@ void StartMotorTask(void *argument)
 
 /* USER CODE BEGIN Header_StartEmergencyTask */
 /**
-* @brief 비상 버튼 입력 시 무조건 최우선 순위로 모터를 즉시 긴급 정지시키는 태스크
+* @brief 비상 버튼 제동 인터럽트 발생 시 플래그 연동 즉시 오프라인 전환 태스크
 */
 void StartEmergencyTask(void *argument)
 {
   for(;;)
   {
-    // 세마포어 무전이 오기 전까지는 완벽히 대기 상태를 유지
     if (osSemaphoreAcquire(myEmergencySemHandle, osWaitForever) == osOK)
     {
-      is_emergency = 1; // 메인 루트 구동 셧다운 플래그 활성화
+      is_emergency = 1; 
       
-      // 모터 1번, 2번 출력으로 가는 펄스를 하드웨어 레벨에서 즉각 차단!
+      // 하드웨어 레벨에서 타이머 펄스 차단
       HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
       HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_2);
       
-      // 사용자에게 비상 상태임을 경고하기 위해 보드의 LED 불을 꺼버림 (상태 변화 반전)
+      // 비상용 알림으로 보드 LED 오프
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
     }
   }

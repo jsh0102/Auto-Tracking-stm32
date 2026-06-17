@@ -42,4 +42,4 @@ my_project\main.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/mpu_wrappe
 my_project\main.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h
 my_project\main.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h
 my_project\main.o: ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h
-my_project\main.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\math.h
+my_project\main.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdio.h
