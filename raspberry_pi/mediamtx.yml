@@ -1,0 +1,9 @@
+# MediaMTX 최소 설정 - tracker.py(RTSP_MODE=push)가 여기로 H.264를 밀어넣는다.
+# 실행:  ./mediamtx mediamtx.yml
+# 시청:  ffplay -rtsp_transport tcp rtsp://<파이IP>:8554/live
+logLevel: info
+rtspAddress: :8554
+protocols: [tcp]
+paths:
+  live:
+    source: publisher

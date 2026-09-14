@@ -31,6 +31,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* 이 시간(ms) 동안 유효 패킷이 한 번도 오지 않으면 링크 두절로 판단한다.
+ * 파이는 약 20Hz(50ms)로 송신하므로 300ms는 6프레임 연속 유실에 해당한다. */
+#define RPI_LINK_TIMEOUT_MS   300U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,7 +72,7 @@ const osSemaphoreAttr_t myEmergencySem_attributes = {
 };
 
 /* USER CODE BEGIN PV */
-uint8_t is_emergency = 0; // 비상 정지 플래그 (0: 정상 구동, 1: 비상정지 발동)
+volatile uint8_t is_emergency = 0; // 비상 정지 플래그 (0: 정상 구동, 1: 비상정지 발동)
 
 /* 라즈베리파이 UART 수신 버퍼 변수 */
 uint8_t rx_data;          // 1바이트 데이터가 들어오는 임시 보관함
@@ -79,6 +82,10 @@ uint8_t rx_idx = 0;       // 방석 버퍼의 인덱스 제어 포인터
 /* 실시간 픽셀 오차 보관용 전역 변수 */
 volatile int32_t rpi_err_x = 0; 
 volatile int32_t rpi_err_y = 0; 
+
+/* 타겟 유효성 및 링크 상태 (USART1 ISR에서 write, 모터 태스크에서 read) */
+volatile uint8_t  rpi_target_valid = 0;   // 1: 현재 프레임에서 사람 검출, 0: 미검출
+volatile uint32_t rpi_last_rx_tick = 0;   // 마지막 유효 패킷 수신 시각 (HAL tick)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -328,11 +335,23 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       int32_t parsed_x = 0;
       int32_t parsed_y = 0;
       
-      // sscanf로 포맷 파싱 (X-120Y45 패턴 실시간 추출)
-      if(sscanf(rx_buf, "X%dY%d", &parsed_x, &parsed_y) == 2)
+      int32_t parsed_d = 1;   // D 필드가 없는 구 프로토콜은 '검출됨'으로 간주
+
+      // [프로토콜 v2] X<오차>Y<오차>D<0|1>   D: 사람 검출 여부
+      if(sscanf(rx_buf, "X%dY%dD%d", &parsed_x, &parsed_y, &parsed_d) == 3)
       {
-        rpi_err_x = parsed_x; // 파싱 성공 시 실시간 변수에 칼주입
-        rpi_err_y = parsed_y;
+        rpi_err_x        = parsed_x;
+        rpi_err_y        = parsed_y;
+        rpi_target_valid = (parsed_d != 0) ? 1 : 0;
+        rpi_last_rx_tick = HAL_GetTick();
+      }
+      // [프로토콜 v1 하위 호환] X<오차>Y<오차>
+      else if(sscanf(rx_buf, "X%dY%d", &parsed_x, &parsed_y) == 2)
+      {
+        rpi_err_x        = parsed_x;
+        rpi_err_y        = parsed_y;
+        rpi_target_valid = 1;
+        rpi_last_rx_tick = HAL_GetTick();
       }
       rx_idx = 0; // 다음 라인을 위해 인덱스 초기화
     }
@@ -397,6 +416,9 @@ void StartMotorTask(void *argument)
   double Kp_x = 0.0008;   double Kd_x = 0.0002; 
   double Kp_y = 0.0006;   double Kd_y = 0.0002;
 
+  // 1: 추적 중 / 0: 타겟 소실 또는 링크 두절 → 현재 각도 유지(hold)
+  uint8_t tracking = 0;
+
   uint32_t pwm_motor1 = 1500;
   uint32_t pwm_motor2 = 1500;
 
@@ -408,9 +430,39 @@ void StartMotorTask(void *argument)
   {
     if (is_emergency == 1) { osDelay(10); continue; }
 
-    // 인터럽트 파싱 데이터 실시간 수혈
-    x_error = -(double)rpi_err_x;
-    y_error = (double)rpi_err_y;
+    /* ── 타겟/링크 상태 판정 ────────────────────────────────────────
+     * 서로 다른 두 가지 실패 모드를 구분한다.
+     *   (1) 타겟 소실 : 링크는 정상이나 프레임에 사람이 없음  (D0 수신)
+     *   (2) 링크 두절 : 파이 다운·케이블 탈락 등으로 패킷 자체가 끊김
+     *
+     * 두 경우 모두 마지막 오차가 그대로 남아 x_current에 계속 누적되면
+     * 카메라가 클램프 한계까지 밀려가는 드리프트가 발생한다.
+     * 따라서 오차를 0으로 만들고 미분기까지 리셋해 제어 출력을 0으로 만들어
+     * 현재 각도를 그대로 유지시킨다.
+     *
+     * ※ HAL_GetTick() - rpi_last_rx_tick 은 부호 없는 뺄셈이므로
+     *   49.7일 후 tick 오버플로우가 나도 차이값은 정상 동작한다.
+     */
+    if ((HAL_GetTick() - rpi_last_rx_tick) > RPI_LINK_TIMEOUT_MS)
+    {
+      tracking = 0;                  // (2) 링크 두절
+    }
+    else
+    {
+      tracking = rpi_target_valid;   // (1) 타겟 검출 여부에 따름
+    }
+
+    if (tracking)
+    {
+      x_error = -(double)rpi_err_x;  // 팬 축은 부호 반전
+      y_error =  (double)rpi_err_y;
+    }
+    else
+    {
+      // 오차 0 + 미분기 리셋 → 제어 출력 0 → 현재 각도에서 정지
+      x_error = 0.0;  x_prev_error = 0.0;
+      y_error = 0.0;  y_prev_error = 0.0;
+    }
 
     // ----------------------------------------------------
     // 🧠 1번 모터 (X축 / 팬) PD 제어 루프

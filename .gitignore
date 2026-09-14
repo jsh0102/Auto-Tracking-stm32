@@ -1,0 +1,46 @@
+# ── 빌드 산출물 ────────────────────────────────
+# Keil MDK-ARM
+MDK-ARM/*/
+!MDK-ARM/DebugConfig/
+*.o
+*.crf
+*.d
+*.axf
+*.map
+*.lnp
+*.dep
+*.htm
+*.bak
+*.iex
+*.sct
+*.lst
+*.uvguix.*
+*.uvoptx
+
+# GNU Make / STM32CubeIDE
+build/
+Debug/
+Release/
+
+# ── 에디터 / 툴 로그 ───────────────────────────
+*.log
+*.lock
+.vscode/*.log
+.vscode/*.log.lock
+
+# ── 대용량 모델 가중치 (릴리스로 배포) ─────────
+*.weights
+
+# ── OS ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── 빌드에 사용되지 않는 CMSIS 팩 서브트리 ─────
+# Keil(.uvprojx)/Makefile 모두 Device, Include, STM32F4xx_HAL_Driver만 참조함
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/Lib/
+Drivers/CMSIS/NN/
+Drivers/CMSIS/Core_A/
+Drivers/CMSIS/RTOS/
+Drivers/CMSIS/RTOS2/
+Drivers/CMSIS/docs/
