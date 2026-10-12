@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h> // 라즈베리파이 문자열 파싱(sscanf)을 위해 표준 입출력 라이브러리 추가
+#include <stdio.h> // 수신 패킷 파싱(sscanf)용
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -75,13 +75,13 @@ const osSemaphoreAttr_t myEmergencySem_attributes = {
 volatile uint8_t is_emergency = 0; // 비상 정지 플래그 (0: 정상 구동, 1: 비상정지 발동)
 
 /* 라즈베리파이 UART 수신 버퍼 변수 */
-uint8_t rx_data;          // 1바이트 데이터가 들어오는 임시 보관함
-char rx_buf[30];          // 문장이 완성될 때까지 담아둘 방석 버퍼
-uint8_t rx_idx = 0;       // 방석 버퍼의 인덱스 제어 포인터
+uint8_t rx_data;          // HAL이 1바이트씩 수신해 채우는 버퍼
+char rx_buf[30];          // 개행까지 한 줄을 조립하는 버퍼
+uint8_t rx_idx = 0;       // rx_buf 내 다음 저장 위치
 
 /* 실시간 픽셀 오차 보관용 전역 변수 */
-volatile int32_t rpi_err_x = 0; 
-volatile int32_t rpi_err_y = 0; 
+volatile int32_t rpi_err_x = 0;
+volatile int32_t rpi_err_y = 0;
 
 /* 타겟 유효성 및 링크 상태 (USART1 ISR에서 write, 모터 태스크에서 read) */
 volatile uint8_t  rpi_target_valid = 0;   // 1: 현재 프레임에서 사람 검출, 0: 미검출
@@ -132,10 +132,10 @@ int main(void)
   MX_USART1_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  // [초기 가동 테스트] 커널 가동 전에 보드 내장 초록 LED(PA5)를 무조건 점등시킵니다.
+  // 주변장치 초기화 완료 표시 (LED on)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-  
-  // [인터럽트 가동 개시] USART1 안테나 작동 활성화
+
+  // UART 수신 인터럽트 최초 무장. 이후에는 수신 콜백이 스스로 재무장한다.
   HAL_UART_Receive_IT(&huart1, &rx_data, 1);
   /* USER CODE END 2 */
 
@@ -210,6 +210,10 @@ static void MX_TIM3_Init(void)
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
+  /* TIM3는 APB1(PCLK1 = 42MHz)에 연결되어 있으나, APB1 프리스케일러가 1이 아니면
+   * 타이머 클럭은 PCLK의 2배가 되므로 실제 TIM3 클럭은 84MHz이다.
+   *   84MHz / (83 + 1)  = 1MHz        -> 1틱 = 1us
+   *   (19999 + 1)틱     = 20,000us    -> 20ms = 50Hz (표준 서보 주기)          */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 83;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -235,18 +239,18 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
-  
-  // 채널 1 세팅 (PA6)
+
+  // 채널 1 (PA6) : 팬(X축)
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1500; // 부팅 시 초기 중앙 정렬
+  sConfigOC.Pulse = 1500; // 1500us = 90도 (중립)
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  
-  // 채널 2 세팅 (PA7)
+
+  // 채널 2 (PA7) : 틸트(Y축)
   sConfigOC.Pulse = 1500;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
@@ -292,7 +296,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PC13 (사용자 푸시 파란 버튼) */
+  /*Configure GPIO pin : PC13 (사용자 버튼 B1, 비상정지) */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -305,7 +309,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /* EXTI 인터럽트 인터페이스 활성화 */
+  /* EXTI 인터럽트 활성화.
+   * 우선순위 5는 configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY와 같은 값으로,
+   * ISR에서 FreeRTOS API를 호출할 수 있는 가장 높은(숫자가 작은) 우선순위다.
+   * 이보다 숫자가 작으면 커널 임계구역에 막히지 않아 세마포어 반환이 위험해진다. */
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
@@ -313,29 +320,29 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_13) 
+  if (GPIO_Pin == GPIO_PIN_13)
   {
-    // 파란 버튼 클릭 시 비상정지 세마포어 전송
+    // ISR에서는 세마포어 반환만 하고 실제 처리는 vEmergencyTask에 위임한다.
     osSemaphoreRelease(myEmergencySemHandle);
   }
 }
 
-//USART1 수신 완료 인터럽트 콜백
+/* USART1 1바이트 수신 완료 콜백. 개행을 만나면 한 줄을 파싱한다. */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if(huart->Instance == USART1)
   {
-    // 데이터 수신 확인용 보드 초록 LED 토글 반전
+    // 수신 활성 표시
     HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 
-    if(rx_data == '\n') // 개행문자를 만나면 한 문장 패킷 완성!
+    if(rx_data == '\n') // 개행 = 패킷 한 개 완성
     {
-      rx_buf[rx_idx] = '\0'; // 문자열 마감
-      
+      rx_buf[rx_idx] = '\0'; // 널 종단
+
       int32_t parsed_x = 0;
       int32_t parsed_y = 0;
-      
-      int32_t parsed_d = 1;   // D 필드가 없는 구 프로토콜은 '검출됨'으로 간주
+
+      int32_t parsed_d = 1;   // D 필드가 없는 v1 패킷은 '검출됨'으로 간주
 
       // [프로토콜 v2] X<오차>Y<오차>D<0|1>   D: 사람 검출 여부
       if(sscanf(rx_buf, "X%dY%dD%d", &parsed_x, &parsed_y, &parsed_d) == 3)
@@ -353,23 +360,31 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         rpi_target_valid = 1;
         rpi_last_rx_tick = HAL_GetTick();
       }
-      rx_idx = 0; // 다음 라인을 위해 인덱스 초기화
+      rx_idx = 0; // 다음 줄을 위해 초기화
     }
     else
     {
-      if(rx_idx < 29) // 버퍼 오버플로우 가드레일
+      if(rx_idx < sizeof(rx_buf) - 1) // 오버플로우 방지
       {
         rx_buf[rx_idx++] = rx_data;
       }
     }
-    
-    // ⚠️ 다음 1글자 연속 낚시질을 위해 비동기 인터럽트 함수 재수행
+
+    // 다음 1바이트 수신을 위해 재무장. 이 호출이 빠지면 수신이 멈춘다.
     HAL_UART_Receive_IT(&huart1, &rx_data, 1);
   }
 }
 
-// 🚨 [UART 에러 복구 콜백 함수]
-// 노이즈나 데이터 딜레이로 인해 ORE 오버런 락이 걸렸을 때 즉시 해제해 주는 방패막이 코드
+/* UART 에러 콜백.
+ *
+ * HAL_UART_Receive_IT()는 1바이트를 받으면 수신을 종료하고 gState를 READY로
+ * 되돌리므로, 콜백에서 다시 무장해야 수신이 이어진다. 그런데 콜백 처리가 늦어진
+ * 사이에 다음 바이트가 도착하면 ORE(Overrun Error)가 발생하고, HAL은
+ * RxCpltCallback 대신 이 콜백으로 진입한다. 여기서 재무장하지 않으면
+ * 수신이 영구히 멈춘다.
+ *
+ * 플래그를 먼저 지우는 이유: 에러 플래그가 남아 있으면 인터럽트가 즉시
+ * 재발생해 무한 루프에 빠진다. 따라서 클리어 -> 재무장 순서를 지킨다.       */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if(huart->Instance == USART1)
@@ -377,8 +392,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
-    
-    HAL_UART_Receive_IT(&huart1, &rx_data, 1); // 통신 파이프라인 재시동
+
+    HAL_UART_Receive_IT(&huart1, &rx_data, 1); // 수신 재무장
   }
 }
 /* USER CODE END 4 */
@@ -395,25 +410,25 @@ void StartDefaultTask(void *argument)
 
 /* USER CODE BEGIN Header_StartMotorTask */
 /**
-* @brief 라즈베리파이 수신 픽셀 오차 연동 실시간 2축 독립 PD 제어 태스크 (정상 알맹이 보존)
+* @brief 2축(팬/틸트) 서보 제어 태스크. 50Hz 고정 주기로 동작한다.
 */
 void StartMotorTask(void *argument)
 {
-  // 90도 정중앙 베이스 라인 포지션 대기
-  double x_current = 90.0;       
-  double x_error = 0.0;         
-  double x_prev_error = 0.0;    
-  double x_derivative = 0.0;    
-  double x_control = 0.0;       
+  // 서보 중립(90도)에서 시작
+  double x_current = 90.0;
+  double x_error = 0.0;
+  double x_prev_error = 0.0;
+  double x_derivative = 0.0;
+  double x_control = 0.0;
 
-  double y_current = 90.0;       
-  double y_error = 0.0;         
-  double y_prev_error = 0.0;    
-  double y_derivative = 0.0;    
-  double y_control = 0.0;       
+  double y_current = 90.0;
+  double y_error = 0.0;
+  double y_prev_error = 0.0;
+  double y_derivative = 0.0;
+  double y_control = 0.0;
 
-  // 💡 [실전 픽셀 제어용 최적화 게인 상수]
-  double Kp_x = 0.0008;   double Kd_x = 0.0002; 
+  // 제어 게인. 진동이 발생하지 않는 범위에서 보수적으로 설정 (실측 튜닝 전)
+  double Kp_x = 0.0008;   double Kd_x = 0.0002;
   double Kp_y = 0.0006;   double Kd_y = 0.0002;
 
   // 1: 추적 중 / 0: 타겟 소실 또는 링크 두절 → 현재 각도 유지(hold)
@@ -422,7 +437,7 @@ void StartMotorTask(void *argument)
   uint32_t pwm_motor1 = 1500;
   uint32_t pwm_motor2 = 1500;
 
-  // 타이머 3 PWM 가동 스타트
+  // PWM 출력 시작
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 
@@ -464,45 +479,44 @@ void StartMotorTask(void *argument)
       y_error = 0.0;  y_prev_error = 0.0;
     }
 
-    // ----------------------------------------------------
-    // 🧠 1번 모터 (X축 / 팬) PD 제어 루프
-    // ----------------------------------------------------
+    /* X축(팬) 제어.
+     * 제어 출력을 각도에 누적(x_current +=)하는 속도형(velocity form) 구조이므로
+     * 거동은 적분기에 가깝다. 오차가 0이 되면 더 이상 움직이지 않는다. */
     x_derivative = x_error - x_prev_error;
     x_control = (Kp_x * x_error) + (Kd_x * x_derivative);
     x_current += x_control;
     x_prev_error = x_error;
 
-    // ----------------------------------------------------
-    // 🧠 2번 모터 (Y축 / 틸트) PD 제어 루프
-    // ----------------------------------------------------
+    /* Y축(틸트) 제어. X축과 동일한 구조, 게인만 다르다. */
     y_derivative = y_error - y_prev_error;
     y_control = (Kp_y * y_error) + (Kd_y * y_derivative);
     y_current += y_control;
     y_prev_error = y_error;
 
-    // 🚨 [안전 가드레일 설치] 모터 하드웨어 보호 범위 엄격 제한 (30 ~ 150)
+    // 기구적 가동 범위 제한 (5 ~ 175도)
     if (x_current < 5.0)   x_current = 5.0;
     if (x_current > 175.0) x_current = 175.0;
     if (y_current < 5.0)   y_current = 5.0;
     if (y_current > 175.0) y_current = 175.0;
 
-    // ⚙️ 하드웨어 PWM 매핑 (0~180도 -> 500~2500 정품 스케일 번역 완료)
+    /* 각도 -> 펄스폭(us) 변환. 기울기 = (2500 - 500) / 180 = 11.111
+     * 타이머가 1us/틱으로 설정되어 있어 us 값을 그대로 CCR에 넣을 수 있다. */
     pwm_motor1 = (uint32_t)((x_current * 11.111) + 500.0);
     pwm_motor2 = (uint32_t)((y_current * 11.111) + 500.0);
 
-    // 하드웨어 타이머 레지스터 강제 업데이트
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_motor1); 
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pwm_motor2); 
-    
-    // 정밀 미분 샘플링 타임 유지를 위해 20ms 간격 사수
-    osDelay(20); 
+    // 매크로 실체는 TIM3->CCR1 / CCR2 직접 대입
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_motor1);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pwm_motor2);
+
+    // 20ms = 50Hz. 미분항이 일정한 샘플링 주기를 전제하므로 고정한다.
+    osDelay(20);
   }
 }
 /* USER CODE END Header_StartMotorTask */
 
 /* USER CODE BEGIN Header_StartEmergencyTask */
 /**
-* @brief 비상 버튼 제동 인터럽트 발생 시 플래그 연동 즉시 오프라인 전환 태스크
+* @brief 비상정지 태스크. 세마포어 대기 중에는 Blocked 상태로 CPU를 점유하지 않는다.
 */
 void StartEmergencyTask(void *argument)
 {
@@ -510,13 +524,13 @@ void StartEmergencyTask(void *argument)
   {
     if (osSemaphoreAcquire(myEmergencySemHandle, osWaitForever) == osOK)
     {
-      is_emergency = 1; 
-      
-      // 하드웨어 레벨에서 타이머 펄스 차단
+      is_emergency = 1;
+
+      // 타이머 출력을 정지시켜 펄스 자체를 차단
       HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
       HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_2);
-      
-      // 비상용 알림으로 보드 LED 오프
+
+      // 비상정지 상태 표시 (LED off)
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
     }
   }
